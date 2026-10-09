@@ -1,0 +1,630 @@
+import csv
+import importlib
+import json
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pandas as pd
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
+from avalon.items import (
+    COLUMNS,
+    FLOAT_COLUMNS,
+    INTEGER_COLUMNS,
+    LIST_COLUMNS,
+    PRICE_COLUMNS,
+)
+
+
+BATCH_SIZE = 100
+
+
+def load_model_config(spider, pipeline_type):
+    module_name = spider.settings.get("MYSQL_MODEL_MODULE")
+
+    if not module_name:
+        raise ValueError("MYSQL_MODEL_MODULE is not configured")
+
+    module = importlib.import_module(module_name)
+    config = getattr(module, "PIPELINE_CONFIG", None)
+
+    if not config:
+        raise ValueError("PIPELINE_CONFIG is missing")
+
+    if pipeline_type not in config:
+        raise ValueError(
+            "Pipeline configuration not found: " + pipeline_type
+        )
+
+    return module, config[pipeline_type]
+
+
+def clean_value(value):
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, float) and value != value:
+        return None
+
+    return value
+
+
+def to_int(value):
+    value = clean_value(value)
+
+    if value is None:
+        return None
+
+    return int(float(value))
+
+
+def to_float(value):
+    value = clean_value(value)
+
+    if value is None:
+        return None
+
+    return float(value)
+
+
+def to_decimal(value):
+    value = clean_value(value)
+
+    if value is None:
+        return None
+
+    return Decimal(str(value))
+
+
+def prepare_row(item):
+    row = {column: clean_value(item.get(column)) for column in COLUMNS}
+
+    for column in ("community_id", "unit_id"):
+        if row.get(column) is not None:
+            row[column] = str(row[column])
+
+    for column in INTEGER_COLUMNS:
+        row[column] = to_int(row.get(column))
+
+    for column in FLOAT_COLUMNS:
+        row[column] = to_float(row.get(column))
+
+    for column in PRICE_COLUMNS:
+        row[column] = to_float(row.get(column))
+
+    if not row.get("scraped_date"):
+        timestamp = row.get("scrape_timestamp")
+
+        if isinstance(timestamp, datetime):
+            row["scraped_date"] = timestamp.strftime("%Y-%m-%d")
+        elif timestamp:
+            row["scraped_date"] = str(timestamp)[:10]
+
+    for column in LIST_COLUMNS:
+        value = row.get(column)
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = []
+
+        row[column] = json.dumps(value or [], ensure_ascii=False)
+
+    if isinstance(row.get("scrape_timestamp"), datetime):
+        row["scrape_timestamp"] = row["scrape_timestamp"].strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    if row.get("scraped_date"):
+        row["scraped_date"] = str(row["scraped_date"])[:10]
+
+    return row
+
+
+def model_columns(model):
+    return {column.name for column in model.__table__.columns}
+
+
+def create_model(model, row):
+    columns = model_columns(model)
+    values = {
+        key: value
+        for key, value in row.items()
+        if key in columns
+    }
+    return model(**values)
+
+
+def model_values(model):
+    return {
+        column.name: getattr(model, column.name)
+        for column in model.__table__.columns
+    }
+
+
+def find_by_columns(session, model, values):
+    filters = [
+        getattr(model, column) == values.get(column)
+        for column in values
+    ]
+
+    return session.execute(
+        select(model).where(*filters)
+    ).scalar_one_or_none()
+
+
+def find_previous(session, model, row, logical_key):
+    filters = [
+        getattr(model, column) == row.get(column)
+        for column in logical_key
+    ]
+
+    return session.execute(
+        select(model)
+        .where(*filters)
+        .order_by(getattr(model, "scraped_date").desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def has_price_changed(previous, current, columns):
+    for column in columns:
+        if to_decimal(getattr(previous, column)) != to_decimal(
+            current.get(column)
+        ):
+            return True
+
+    return False
+
+
+def create_history(history_model, previous):
+    values = model_values(previous)
+    columns = model_columns(history_model)
+
+    values = {
+        key: value
+        for key, value in values.items()
+        if key in columns
+    }
+
+    return history_model(**values)
+
+
+def create_engine_and_session(spider):
+    connection_string = spider.settings.get("MYSQL_CONNECTION")
+
+    if not connection_string:
+        raise ValueError("MYSQL_CONNECTION is not configured")
+
+    engine = create_engine(connection_string)
+    Session = sessionmaker(bind=engine)
+
+    return engine, Session
+
+
+class JsonPipeline:
+    def open_spider(self, spider):
+        self.output_dir = Path(
+            spider.settings.get("EXPORT_DIR")
+        )
+        self.output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.file = open(
+            self.output_dir / "avalon_units.json",
+            "w",
+            encoding="utf-8",
+        )
+
+        self.file.write("[\n")
+        self.first_item = True
+
+    def process_item(self, item, spider):
+        row = prepare_row(item)
+
+        if not self.first_item:
+            self.file.write(",\n")
+
+        json.dump(
+            row,
+            self.file,
+            ensure_ascii=False,
+        )
+
+        self.first_item = False
+        return item
+
+    def close_spider(self, spider):
+        self.file.write("\n]\n")
+        self.file.close()
+
+
+class CsvPipeline:
+    def open_spider(self, spider):
+        self.output_dir = Path(
+            spider.settings.get("EXPORT_DIR")
+        )
+        self.output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.file = open(
+            self.output_dir / "avalon_units.csv",
+            "w",
+            newline="",
+            encoding="utf-8",
+        )
+
+        self.writer = csv.DictWriter(
+            self.file,
+            fieldnames=COLUMNS,
+        )
+
+        self.writer.writeheader()
+
+    def process_item(self, item, spider):
+        self.writer.writerow(prepare_row(item))
+        return item
+
+    def close_spider(self, spider):
+        self.file.close()
+
+
+class ParquetPipeline:
+    def open_spider(self, spider):
+        self.output_dir = Path(
+            spider.settings.get("EXPORT_DIR")
+        )
+        self.output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.rows = []
+
+    def process_item(self, item, spider):
+        self.rows.append(prepare_row(item))
+        return item
+
+    def close_spider(self, spider):
+        if not self.rows:
+            return
+
+        pd.DataFrame(
+            self.rows,
+            columns=COLUMNS,
+        ).to_parquet(
+            self.output_dir / "avalon_units.parquet",
+            index=False,
+        )
+
+
+class MySQLFlatPipeline:
+    def open_spider(self, spider):
+        self.rows = []
+        self.engine = None
+
+        _, self.config = load_model_config(
+            spider,
+            "flat",
+        )
+
+        self.model = self.config["model"]
+        self.history_model = self.config["history_model"]
+        self.logical_key = self.config["logical_key"]
+        self.daily_key = self.config["daily_key"]
+        self.history_compare = self.config["history_compare"]
+
+        self.engine, self.Session = create_engine_and_session(spider)
+        self.model.metadata.create_all(self.engine)
+        self.rows = []
+
+    def process_item(self, item, spider):
+        self.rows.append(prepare_row(item))
+
+        if len(self.rows) >= BATCH_SIZE:
+            self.write_batch()
+
+        return item
+
+    def write_batch(self):
+        if not self.rows:
+            return
+
+        session = self.Session()
+
+        try:
+            for row in self.rows:
+                existing = find_by_columns(
+                    session,
+                    self.model,
+                    {
+                        column: row.get(column)
+                        for column in self.daily_key
+                    },
+                )
+
+                if existing:
+                    continue
+
+                previous = find_previous(
+                    session,
+                    self.model,
+                    row,
+                    self.logical_key,
+                )
+
+                if previous and has_price_changed(
+                    previous,
+                    row,
+                    self.history_compare,
+                ):
+                    session.add(
+                        create_history(
+                            self.history_model,
+                            previous,
+                        )
+                    )
+
+                session.add(
+                    create_model(
+                        self.model,
+                        row,
+                    )
+                )
+
+            session.commit()
+            self.rows = []
+
+        except Exception:
+            session.rollback()
+            self.rows = []
+            raise
+
+        finally:
+            session.close()
+
+    def close_spider(self, spider):
+        try:
+            if self.engine is not None:
+                self.write_batch()
+        finally:
+            if self.engine is not None:
+                self.engine.dispose()
+
+
+class MySQLRelationalPipeline:
+    def open_spider(self, spider):
+        self.rows = {}
+        self.engine = None
+
+        _, self.config = load_model_config(
+            spider,
+            "relational",
+        )
+
+        self.models = self.config["models"]
+        self.pricing_model = self.config["pricing_model"]
+        self.pricing_history_model = self.config[
+            "pricing_history_model"
+        ]
+        self.pricing_logical_key = self.config[
+            "pricing_logical_key"
+        ]
+        self.pricing_daily_key = self.config[
+            "pricing_daily_key"
+        ]
+        self.history_compare = self.config[
+            "history_compare"
+        ]
+
+        self.engine, self.Session = create_engine_and_session(spider)
+        self.models[0].metadata.create_all(self.engine)
+        self.rows = {}
+
+    def process_item(self, item, spider):
+        row = prepare_row(item)
+
+        key = tuple(
+            row.get(column)
+            for column in self.pricing_daily_key
+        )
+
+        self.rows[key] = row
+
+        if len(self.rows) >= BATCH_SIZE:
+            self.write_batch()
+
+        return item
+
+    def write_batch(self):
+        if not self.rows:
+            return
+
+        session = self.Session()
+
+        try:
+            for row in self.rows.values():
+                self.write_relational_row(
+                    session,
+                    row,
+                )
+
+            session.commit()
+            self.rows = {}
+
+        except Exception:
+            session.rollback()
+            self.rows = {}
+            raise
+
+        finally:
+            session.close()
+
+    def write_relational_row(self, session, row):
+        for model in self.models:
+            key_columns = getattr(
+                model,
+                "__pipeline_key__",
+                None,
+            )
+
+            if not key_columns:
+                continue
+
+            existing = find_by_columns(
+                session,
+                model,
+                {
+                    column: row.get(column)
+                    for column in key_columns
+                },
+            )
+
+            if not existing:
+                session.add(
+                    create_model(
+                        model,
+                        row,
+                    )
+                )
+
+        existing_pricing = find_by_columns(
+            session,
+            self.pricing_model,
+            {
+                column: row.get(column)
+                for column in self.pricing_daily_key
+            },
+        )
+
+        if existing_pricing:
+            return
+
+        previous = find_previous(
+            session,
+            self.pricing_model,
+            row,
+            self.pricing_logical_key,
+        )
+
+        if previous and has_price_changed(
+            previous,
+            row,
+            self.history_compare,
+        ):
+            session.add(
+                create_history(
+                    self.pricing_history_model,
+                    previous,
+                )
+            )
+
+        session.add(
+            create_model(
+                self.pricing_model,
+                row,
+            )
+        )
+
+    def close_spider(self, spider):
+        try:
+            if self.engine is not None:
+                self.write_batch()
+        finally:
+            if self.engine is not None:
+                self.engine.dispose()
+
+
+def read_input_file(path):
+    path = Path(path)
+
+    if path.suffix.lower() == ".json":
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            return json.load(file)
+
+    if path.suffix.lower() == ".csv":
+        with open(
+            path,
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            return list(csv.DictReader(file))
+
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path).to_dict(
+            orient="records"
+        )
+
+    raise ValueError(
+        "Unsupported file format: " + path.suffix
+    )
+
+
+class FileToMySQLPipeline(MySQLRelationalPipeline):
+    def open_spider(self, spider):
+        MySQLRelationalPipeline.open_spider(
+            self,
+            spider,
+        )
+
+        self.output_dir = Path(
+            spider.settings.get("EXPORT_DIR")
+        )
+
+        self.file_format = spider.settings.get(
+            "MYSQL_FILE_FORMAT",
+            "csv",
+        )
+
+    def process_item(self, item, spider):
+        return item
+
+    def close_spider(self, spider):
+        if self.engine is None:
+            return
+
+        input_file = (
+            self.output_dir
+            / ("avalon_units." + self.file_format)
+        )
+
+        if not input_file.exists():
+            spider.logger.warning(
+                "File not found: %s",
+                input_file,
+            )
+            self.engine.dispose()
+            return
+
+        rows = read_input_file(input_file)
+        self.rows = {}
+
+        for row in rows:
+            row = prepare_row(row)
+
+            key = tuple(
+                row.get(column)
+                for column in self.pricing_daily_key
+            )
+
+            self.rows[key] = row
+
+            if len(self.rows) >= BATCH_SIZE:
+                self.write_batch()
+
+        try:
+            self.write_batch()
+        finally:
+            self.engine.dispose()
