@@ -1,0 +1,269 @@
+from decimal import Decimal
+from typing import List, Optional
+
+from sqlalchemy import (
+    Float,
+    ForeignKeyConstraint,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class AvalonUnit(Base):
+    __tablename__ = "avalon_units"
+
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    unit_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    move_in_date: Mapped[str] = mapped_column(String(100), primary_key=True)
+    lease_term_months: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False
+    )
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    community_id: Mapped[Optional[str]] = mapped_column(String(100))
+    community_name: Mapped[Optional[str]] = mapped_column(String(255))
+    neighborhood: Mapped[Optional[str]] = mapped_column(String(255))
+    address_line1: Mapped[Optional[str]] = mapped_column(String(500))
+    state: Mapped[Optional[str]] = mapped_column(String(100))
+    zip: Mapped[Optional[str]] = mapped_column(String(50))
+    latitude: Mapped[Optional[float]] = mapped_column(Float)
+    longitude: Mapped[Optional[float]] = mapped_column(Float)
+    phone: Mapped[Optional[str]] = mapped_column(String(100))
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    community_description: Mapped[Optional[str]] = mapped_column(Text)
+    community_amenities: Mapped[Optional[str]] = mapped_column(Text)
+    community_url: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+    unit_name: Mapped[Optional[str]] = mapped_column(String(255))
+    unit_url: Mapped[Optional[str]] = mapped_column(Text)
+    bed: Mapped[Optional[int]] = mapped_column(Integer)
+    bath: Mapped[Optional[float]] = mapped_column(Float)
+    area: Mapped[Optional[float]] = mapped_column(Float)
+    furnish_status: Mapped[Optional[str]] = mapped_column(String(100))
+    furnished_available_date: Mapped[Optional[str]] = mapped_column(String(100))
+    occupant_maximum: Mapped[Optional[int]] = mapped_column(Integer)
+
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+
+    promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class AvalonUnitHistory(Base):
+    __tablename__ = "avalon_units_history"
+
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    unit_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    move_in_date: Mapped[str] = mapped_column(String(100), primary_key=True)
+    lease_term_months: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False
+    )
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    community_id: Mapped[Optional[str]] = mapped_column(String(100))
+    community_name: Mapped[Optional[str]] = mapped_column(String(255))
+    neighborhood: Mapped[Optional[str]] = mapped_column(String(255))
+    address_line1: Mapped[Optional[str]] = mapped_column(String(500))
+    state: Mapped[Optional[str]] = mapped_column(String(100))
+    zip: Mapped[Optional[str]] = mapped_column(String(50))
+    latitude: Mapped[Optional[float]] = mapped_column(Float)
+    longitude: Mapped[Optional[float]] = mapped_column(Float)
+    phone: Mapped[Optional[str]] = mapped_column(String(100))
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    community_description: Mapped[Optional[str]] = mapped_column(Text)
+    community_amenities: Mapped[Optional[str]] = mapped_column(Text)
+    community_url: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+    unit_name: Mapped[Optional[str]] = mapped_column(String(255))
+    unit_url: Mapped[Optional[str]] = mapped_column(Text)
+    bed: Mapped[Optional[int]] = mapped_column(Integer)
+    bath: Mapped[Optional[float]] = mapped_column(Float)
+    area: Mapped[Optional[float]] = mapped_column(Float)
+    furnish_status: Mapped[Optional[str]] = mapped_column(String(100))
+    furnished_available_date: Mapped[Optional[str]] = mapped_column(String(100))
+    occupant_maximum: Mapped[Optional[int]] = mapped_column(Integer)
+
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+
+    promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class Community(Base):
+    __tablename__ = "communities"
+    __pipeline_key__ = ["community_id", "scraped_date"]
+
+    community_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    community_name: Mapped[Optional[str]] = mapped_column(String(255))
+    neighborhood: Mapped[Optional[str]] = mapped_column(String(255))
+    address_line1: Mapped[Optional[str]] = mapped_column(String(500))
+    state: Mapped[Optional[str]] = mapped_column(String(100))
+    zip: Mapped[Optional[str]] = mapped_column(String(50))
+    latitude: Mapped[Optional[float]] = mapped_column(Float)
+    longitude: Mapped[Optional[float]] = mapped_column(Float)
+    phone: Mapped[Optional[str]] = mapped_column(String(100))
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    community_description: Mapped[Optional[str]] = mapped_column(Text)
+    community_amenities: Mapped[Optional[str]] = mapped_column(Text)
+    community_url: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    community_promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+    units: Mapped[List["Unit"]] = relationship(back_populates="community")
+
+
+class Unit(Base):
+    __tablename__ = "units"
+    __pipeline_key__ = ["unit_id", "scraped_date"]
+
+    unit_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    community_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    unit_name: Mapped[Optional[str]] = mapped_column(String(255))
+    unit_url: Mapped[Optional[str]] = mapped_column(Text)
+    bed: Mapped[Optional[int]] = mapped_column(Integer)
+    bath: Mapped[Optional[float]] = mapped_column(Float)
+    area: Mapped[Optional[float]] = mapped_column(Float)
+    furnish_status: Mapped[Optional[str]] = mapped_column(String(100))
+    furnished_available_date: Mapped[Optional[str]] = mapped_column(String(100))
+    occupant_maximum: Mapped[Optional[int]] = mapped_column(Integer)
+    promotion_ids: Mapped[Optional[str]] = mapped_column(Text)
+    promotion_descriptions: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["community_id", "scraped_date"],
+            ["communities.community_id", "communities.scraped_date"],
+        ),
+    )
+
+    community: Mapped["Community"] = relationship(back_populates="units")
+    pricing: Mapped[List["UnitPricing"]] = relationship(back_populates="unit")
+
+
+class UnitPricing(Base):
+    __tablename__ = "unit_pricing"
+
+    unit_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    move_in_date: Mapped[str] = mapped_column(String(100), primary_key=True)
+    lease_term_months: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False
+    )
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["unit_id", "scraped_date"],
+            ["units.unit_id", "units.scraped_date"],
+        ),
+    )
+
+    unit: Mapped["Unit"] = relationship(back_populates="pricing")
+
+
+class UnitPricingHistory(Base):
+    __tablename__ = "unit_pricing_history"
+
+    unit_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    move_in_date: Mapped[str] = mapped_column(String(100), primary_key=True)
+    lease_term_months: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False
+    )
+    scraped_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+
+    scrape_timestamp: Mapped[Optional[str]] = mapped_column(String(100))
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    furnished_total_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["unit_id", "scraped_date"],
+            ["units.unit_id", "units.scraped_date"],
+        ),
+    )
+
+
+PIPELINE_CONFIG = {
+    "flat": {
+        "model": AvalonUnit,
+        "history_model": AvalonUnitHistory,
+        "logical_key": [
+            "unit_id",
+            "move_in_date",
+            "lease_term_months",
+        ],
+        "daily_key": [
+            "unit_id",
+            "move_in_date",
+            "lease_term_months",
+            "scraped_date",
+        ],
+        "history_compare": [
+            "price",
+            "total_price",
+            "furnished_price",
+            "furnished_total_price",
+        ],
+    },
+    "relational": {
+        "models": [
+            Community,
+            Unit,
+            UnitPricing,
+        ],
+        "pricing_model": UnitPricing,
+        "pricing_history_model": UnitPricingHistory,
+        "pricing_logical_key": [
+            "unit_id",
+            "move_in_date",
+            "lease_term_months",
+        ],
+        "pricing_daily_key": [
+            "unit_id",
+            "move_in_date",
+            "lease_term_months",
+            "scraped_date",
+        ],
+        "history_compare": [
+            "price",
+            "total_price",
+            "furnished_price",
+            "furnished_total_price",
+        ],
+    },
+}
