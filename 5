@@ -1,0 +1,109 @@
+import scrapy
+
+
+COLUMNS = [
+    "scrape_timestamp",
+    "scraped_date",
+    "community_id",
+    "community_name",
+    "neighborhood",
+    "address_line1",
+    "state",
+    "zip",
+    "latitude",
+    "longitude",
+    "phone",
+    "email",
+    "community_description",
+    "community_amenities",
+    "community_url",
+    "community_promotion_ids",
+    "community_promotion_descriptions",
+    "unit_id",
+    "unit_name",
+    "unit_url",
+    "bed",
+    "bath",
+    "area",
+    "furnish_status",
+    "furnished_available_date",
+    "occupant_maximum",
+    "move_in_date",
+    "lease_term_months",
+    "price",
+    "total_price",
+    "furnished_price",
+    "furnished_total_price",
+    "promotion_ids",
+    "promotion_descriptions",
+]
+
+LIST_COLUMNS = {
+    "community_amenities",
+    "community_promotion_ids",
+    "community_promotion_descriptions",
+    "promotion_ids",
+    "promotion_descriptions",
+}
+
+INTEGER_COLUMNS = {
+    "bed",
+    "occupant_maximum",
+    "lease_term_months",
+}
+
+FLOAT_COLUMNS = {
+    "latitude",
+    "longitude",
+    "bath",
+    "area",
+}
+
+PRICE_COLUMNS = [
+    "price",
+    "total_price",
+    "furnished_price",
+    "furnished_total_price",
+]
+
+
+class AvalonItem(scrapy.Item):
+    scrape_timestamp = scrapy.Field()
+    scraped_date = scrapy.Field()
+
+    community_id = scrapy.Field()
+    community_name = scrapy.Field()
+    neighborhood = scrapy.Field()
+    address_line1 = scrapy.Field()
+    state = scrapy.Field()
+    zip = scrapy.Field()
+    latitude = scrapy.Field()
+    longitude = scrapy.Field()
+    phone = scrapy.Field()
+    email = scrapy.Field()
+    community_description = scrapy.Field()
+    community_amenities = scrapy.Field()
+    community_url = scrapy.Field()
+    community_promotion_ids = scrapy.Field()
+    community_promotion_descriptions = scrapy.Field()
+
+    unit_id = scrapy.Field()
+    unit_name = scrapy.Field()
+    unit_url = scrapy.Field()
+    bed = scrapy.Field()
+    bath = scrapy.Field()
+    area = scrapy.Field()
+    furnish_status = scrapy.Field()
+    furnished_available_date = scrapy.Field()
+    occupant_maximum = scrapy.Field()
+
+    move_in_date = scrapy.Field()
+    lease_term_months = scrapy.Field()
+
+    price = scrapy.Field()
+    total_price = scrapy.Field()
+    furnished_price = scrapy.Field()
+    furnished_total_price = scrapy.Field()
+
+    promotion_ids = scrapy.Field()
+    promotion_descriptions = scrapy.Field()
