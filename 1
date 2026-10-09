@@ -1,0 +1,427 @@
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+import json
+import re
+import scrapy
+
+
+GLOBAL_CONTENT_RE = re.compile(r"Fusion\.globalContent\s*=\s*", re.I)
+LD_JSON_RE = re.compile(
+    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+BRAND_RE = re.compile(r"^(?:avalon|ava|eaves|kanso)\b", re.I)
+
+class AvalonSpider(scrapy.Spider):
+    name = "avalon"
+    allowed_domains = ["www.avaloncommunities.com", "avaloncommunities.com"]
+    start_urls = ["https://www.avaloncommunities.com/"]
+
+    def __init__(self, run_id=None, states=None, community_limit=None, unit_limit=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.scraped_at = datetime.now(timezone.utc).isoformat()
+        self.state_filter = (
+            {x.strip().lower() for x in states.split(",") if x.strip()}
+            if states else None
+        )
+        self.community_limit = int(community_limit) if community_limit else None
+        self.unit_limit = int(unit_limit) if unit_limit else None
+
+    def parse(self, response):
+        seen = set()
+        matched = 0
+        links = response.css("div.footer-links.locations a")
+
+        for link in links:
+            href = link.attrib.get("href")
+            if not href:
+                continue
+            url = response.urljoin(href)
+            key = url.rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+
+            slug = urlparse(url).path.strip("/").split("/")[-1].lower()
+            label = " ".join(link.css("::text").getall()).strip()
+
+            if self.state_filter:
+                label_l = label.lower().replace(" apartments", "").strip()
+                candidates = {slug, label_l, label_l.replace(" ", "-")}
+                if not (candidates & self.state_filter):
+                    self.logger.info(
+                        "Skipping state link %s (slug=%r label=%r)", url, slug, label
+                    )
+                    continue
+
+            matched += 1
+            yield response.follow(
+                url,
+                callback=self.parse_state,
+                errback=self.on_error,
+                cb_kwargs={"state_label": label},
+            )
+
+        if not links:
+            self.logger.error("No footer state links found")
+        elif self.state_filter and not matched:
+            self.logger.error("states=%s matched none of the footer links", self.state_filter)
+
+    def parse_state(self, response, state_label):
+        try:
+            data = extract_global_content(response.text)
+            communities, stats = select_communities(data)
+        except PageDataError as exc:
+            self.logger.error("State parsing failed for %s: %s", response.url, exc)
+            return
+
+        self.logger.info(
+            "%s: seen=%d selected=%d external=%d unapproved=%d",
+            state_label, stats["seen"], stats["selected"],
+            stats["skipped_external"], stats["skipped_unapproved_brand"],
+        )
+
+        if self.community_limit:
+            communities = communities[:self.community_limit]
+
+        for community in communities:
+            yield response.follow(
+                community["url"],
+                callback=self.parse_community,
+                errback=self.on_error,
+                cb_kwargs={"state_label": state_label},
+            )
+
+    def parse_community(self, response, state_label):
+        try:
+            data = extract_global_content(response.text)
+            context = parse_community_context(
+                data, extract_community_description(response.text), response.url
+            )
+        except PageDataError as exc:
+            self.logger.error("Community parsing failed for %s: %s", response.url, exc)
+            return
+
+        unit_refs = context["unit_refs"]
+        if self.unit_limit:
+            unit_refs = unit_refs[:self.unit_limit]
+
+        self.logger.info("%s: %d units", context["community_name"], len(unit_refs))
+
+        for unit_ref in unit_refs:
+            yield response.follow(
+                unit_ref["url"],
+                callback=self.parse_unit,
+                errback=self.on_error,
+                cb_kwargs={"community_context": context},
+            )
+
+    def parse_unit(self, response, community_context):
+        try:
+            data = extract_global_content(response.text)
+            rows = normalize_unit_records(data, community_context, self.scraped_at)
+        except PageDataError as exc:
+            self.logger.error("Unit parsing failed for %s: %s", response.url, exc)
+            return
+
+        for row in rows:
+            row["unit_url"] = response.url
+            errors = validate_final_row(row)
+            if errors:
+                self.logger.error("Invalid row for %s: %s", response.url, errors)
+                continue
+            yield row
+
+    def on_error(self, failure):
+        self.logger.error("Request failed: %s -> %r", failure.request.url, failure.value)
+
+class PageDataError(ValueError):
+    pass
+
+
+def extract_global_content(html):
+    """Extract the object assigned to Fusion.globalContent without brittle
+    regex matching of the entire JSON blob."""
+    match = GLOBAL_CONTENT_RE.search(html)
+    if not match:
+        raise PageDataError("Fusion.globalContent was not found")
+
+    decoder = json.JSONDecoder()
+    try:
+        data, _ = decoder.raw_decode(html, match.end())
+    except json.JSONDecodeError as exc:
+        raise PageDataError(
+            "Fusion.globalContent could not be decoded: %s" % exc
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise PageDataError("Fusion.globalContent is not a JSON object")
+
+    return data
+
+
+def is_relative_url(url):
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return not parsed.scheme and not parsed.netloc
+
+
+def is_allowed_community(name, url):
+    """Strict project rule: same-site relative URL + approved brand name."""
+    return is_relative_url(url) and bool(
+        name and BRAND_RE.match(name.strip())
+    )
+
+
+def extract_community_description(html):
+    """Read the ApartmentComplex JSON-LD description from a community page."""
+    for raw in LD_JSON_RE.findall(html):
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        nodes = doc if isinstance(doc, list) else [doc]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            types = node.get("@type", [])
+            types = types if isinstance(types, list) else [types]
+            if "ApartmentComplex" in types and node.get("description"):
+                return str(node["description"]).strip()
+
+    return None
+
+
+def select_communities(state_data):
+    items = (
+        state_data.get("communityResults", {})
+        .get("communities", {})
+        .get("items", [])
+    ) or []
+
+    selected = []
+    stats = {
+        "seen": 0,
+        "selected": 0,
+        "skipped_external": 0,
+        "skipped_unapproved_brand": 0,
+    }
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        stats["seen"] += 1
+        url = item.get("url")
+        name = item.get("name")
+
+        if not is_relative_url(url):
+            stats["skipped_external"] += 1
+            continue
+
+        if not is_allowed_community(name, url):
+            stats["skipped_unapproved_brand"] += 1
+            continue
+
+        selected.append(
+            {
+                "community_id": item.get("communityId"),
+                "name": name,
+                "url": url,
+            }
+        )
+
+    stats["selected"] = len(selected)
+    return selected, stats
+
+
+def _unique_strings(values):
+    result = []
+    seen = set()
+    for value in values:
+        if value is None:
+            continue
+        value = str(value).strip()
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def _promotion_lists(promotions):
+    ids = []
+    descriptions = []
+    for promotion in promotions or []:
+        if not isinstance(promotion, dict):
+            continue
+        if promotion.get("promotionId") is not None:
+            ids.append(str(promotion["promotionId"]))
+        if promotion.get("promotionDescription"):
+            descriptions.append(str(promotion["promotionDescription"]).strip())
+    return _unique_strings(ids), _unique_strings(descriptions)
+
+
+def parse_community_context(data, description, community_url):
+    community_id = data.get("communityId")
+    if not community_id:
+        raise PageDataError("communityId missing")
+
+    address = data.get("address") or {}
+    coordinates = data.get("coordinates") or {}
+
+    amenities = _unique_strings(
+        feature.get("name")
+        for feature in (data.get("features") or [])
+        if isinstance(feature, dict)
+    )
+
+    unit_refs = []
+    for unit in data.get("units") or []:
+        if not isinstance(unit, dict) or not unit.get("url"):
+            continue
+
+        unit_refs.append(
+            {
+                "unit_id": unit.get("unitId"),
+                "url": unit.get("url"),
+                "unit_status": unit.get("unitStatus"),
+                "available_date_unfurnished": unit.get("availableDateUnfurnished"),
+                "available_date_furnished": unit.get("availableDateFurnished"),
+            }
+        )
+
+    return {
+        "community_id": community_id,
+        "community_name": data.get("name"),
+        "neighborhood": address.get("city"),
+        "address_line1": address.get("addressLine1"),
+        "state": address.get("state"),
+        "zip": address.get("zip"),
+        "latitude": coordinates.get("latitude"),
+        "longitude": coordinates.get("longitude"),
+        "phone": data.get("phone"),
+        "email": data.get("email"),
+        "amenities": amenities,
+        "community_description": description,
+        "community_url": community_url,
+        "unit_refs": unit_refs,
+    }
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    return value
+
+
+def normalize_unit_records(data, community_context, scraped_at=None):
+    """Flatten the nested move-in-date/lease-term pricing into rows.
+
+    Grain:
+        one row = one unit + one move-in date + one lease term
+
+    Net-effective fields are deliberately ignored.
+    """
+    unit = data.get("unit") or {}
+    unit_id = unit.get("unitId")
+    if not unit_id:
+        raise PageDataError("unit.unitId missing")
+
+    prices_by_date = (unit.get("unitRentPrice") or {}).get(
+        "pricesPerMoveinDate"
+    ) or []
+
+    promotion_ids, promotion_descriptions = _promotion_lists(
+        unit.get("promotions")
+    )
+
+    # Preserve a single timestamp across all rows from this page.
+    if scraped_at is None:
+        scraped_at = datetime.now(timezone.utc).isoformat()
+
+    rows = []
+    for move_in in prices_by_date:
+        if not isinstance(move_in, dict):
+            continue
+
+        move_in_date = parse_timestamp(move_in.get("moveInDate"))
+        prices_by_term = move_in.get("pricesPerTerms") or {}
+
+        for lease_term, prices in prices_by_term.items():
+            if not isinstance(prices, dict):
+                continue
+
+            try:
+                lease_term_months = int(lease_term)
+            except (TypeError, ValueError):
+                continue
+
+            # No netEffectivePrice anywhere in the output.
+            row = {
+                "scrape_timestamp": scraped_at,
+                "community_id": community_context["community_id"],
+                "community_name": community_context["community_name"],
+                "neighborhood": community_context["neighborhood"],
+                "address_line1": community_context["address_line1"],
+                "state": community_context["state"],
+                "zip": community_context["zip"],
+                "latitude": community_context["latitude"],
+                "longitude": community_context["longitude"],
+                "phone": community_context["phone"],
+                "email": community_context["email"],
+                "community_description": community_context["community_description"],
+                "community_amenities": community_context["amenities"],
+                "community_url": community_context["community_url"],
+                "unit_id": unit_id,
+                "unit_name": unit.get("name"),
+                "unit_url": None,  # filled by spider from response.url
+                "bed": unit.get("bedroom"),
+                "bath": unit.get("bathroom"),
+                "area": unit.get("squareFeet"),
+                "furnish_status": unit.get("furnishStatus"),
+                "furnished_available_date": unit.get("furnishedAvailableDate"),
+                "occupant_maximum": unit.get("occupantMaximum"),
+                "move_in_date": move_in_date,
+                "lease_term_months": lease_term_months,
+                "price": prices.get("price"),
+                "total_price": prices.get("totalPrice"),
+                "furnished_price": prices.get("furnishedPrice"),
+                "furnished_total_price": prices.get("furnishedTotalPrice"),
+                "promotion_ids": promotion_ids,
+                "promotion_descriptions": promotion_descriptions,
+            }
+            rows.append(row)
+
+    return rows
+
+
+def validate_final_row(row):
+    errors = []
+    required = [
+        "scrape_timestamp",
+        "community_id",
+        "unit_id",
+        "move_in_date",
+        "lease_term_months",
+    ]
+
+    for key in required:
+        if row.get(key) in (None, ""):
+            errors.append("missing:%s" % key)
+
+    if "net_effective_price" in row:
+        errors.append("forbidden_column:net_effective_price")
+    if "net_effective_prices" in row:
+        errors.append("forbidden_column:net_effective_prices")
+
+    if not isinstance(row.get("community_amenities"), list):
+        errors.append("community_amenities_must_be_list")
+    if not isinstance(row.get("promotion_ids"), list):
+        errors.append("promotion_ids_must_be_list")
+    if not isinstance(row.get("promotion_descriptions"), list):
+        errors.append("promotion_descriptions_must_be_list")
+
+    return errors
